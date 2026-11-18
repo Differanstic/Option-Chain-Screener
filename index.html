@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Real-time Option Chain</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root{--bg:#0b0f14;--panel:#121821;--line:#1f2a37;--text:#e6edf3;--muted:#8b9bb0;--green:#1fbf75;--red:#ff5c5c;--accent:#4aa8ff;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif}
+  header{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+  header h1{font-size:16px;margin:0;color:var(--accent)}
+  input,button{font:inherit;background:#0e141b;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  input{width:260px} button{cursor:pointer;background:#17304a;border-color:#1f4a72} button:hover{background:#1d3d5e}
+  .pill{font-size:12px;color:var(--muted)}
+  .stats{display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:120px}
+  .stat b{display:block;font-size:16px;margin-top:2px}
+  .wrap{overflow:auto;padding:0 16px 24px}
+  table{width:100%;border-collapse:collapse;min-width:1100px}
+  th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+  th{position:sticky;top:0;background:#0f151d;color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  td.strike{background:#0f151d;font-weight:700;color:#fff;text-align:center}
+  tr.spot td{background:#0f1a13;color:var(--green);font-weight:700;text-align:center}
+  .ce{color:#ffb4b4} .pe{color:#a7ffcf} .pos{color:var(--green)} .neg{color:var(--red)} .live{color:var(--green);font-weight:600} .err{color:var(--red);font-weight:600} .num{font-variant-numeric:tabular-nums}
+  .quick{display:flex;flex-wrap:wrap;gap:6px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .chip{font:12px/1 system-ui,Segoe UI,Roboto,sans-serif;padding:6px 10px;border-radius:999px;cursor:pointer;background:#0e141b;color:var(--text);border:1px solid var(--line);transition:background .15s,border-color .15s}
+  .chip:hover{background:#17304a;border-color:#1f4a72} .chip.active{background:#17304a;border-color:var(--accent);color:#fff}
+  .chip .x{margin-left:6px;color:var(--muted)} .chip .x:hover{color:var(--red)} .chip.recent{background:#131c26}
+  tr.max-ce td.strike{background:#3a1f1f;color:#ffb4b4;box-shadow:inset 3px 0 0 var(--red)}
+  tr.max-pe td.strike{background:#123326;color:#a7ffcf;box-shadow:inset -3px 0 0 var(--green)}
+  tr.max-ce td.ce-oi{color:#ffd0d0;font-weight:700} tr.max-pe td.pe-oi{color:#c8ffe0;font-weight:700}
+  tr.max-pain td.strike{background:#3a3320;color:#ffd166;box-shadow:inset 0 0 0 1px #ffd166}
+  tr.max-pain td.strike::after{content:" \2605";font-size:10px;color:#ffd166} .maxpain{color:#ffd166}
+  
+  /* Grid updates to prevent full-width stretching */
+  .charts{
+    display:grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 440px)); /* max width 440px per card */
+    justify-content: center; 
+    gap: 16px;
+    padding: 16px;
+  }
+  .chart-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px; height: 280px;}
+  .chart-title{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
+  .chart-card canvas{width:100%!important;height:220px!important}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Option Chain</h1>
+  <input id="sym" value="NSE:NIFTY50-INDEX" placeholder="NSE:NIFTY50-INDEX" />
+  <button id="go">Load</button>
+  <button id="auto">Auto: ON</button>
+  <span class="pill" id="status">idle</span>
+  <span class="pill" id="clock"></span>
+</header>
+<div class="quick" id="quick"></div>
+<div class="stats" id="stats"></div>
+
+<div class="wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>CE OI</th><th>CE OI%</th><th>CE Vol</th><th>CE LTP</th><th>CE IV</th><th>CE Δ</th><th>CE Γ</th>
+        <th>Strike</th>
+        <th>PE Γ</th><th>PE Δ</th><th>PE IV</th><th>PE LTP</th><th>PE Vol</th><th>PE OI%</th><th>PE OI</th>
+      </tr>
+    </thead>
+    <tbody id="body"></tbody>
+  </table>
+</div>
+
+<div class="charts">
+  <div class="chart-card"><div class="chart-title">Spot vs Max Pain</div><canvas id="ch-spot"></canvas></div>
+  <div class="chart-card"><div class="chart-title">Net Δ Exposure (₹)</div><canvas id="ch-delta"></canvas></div>
+  <div class="chart-card"><div class="chart-title">Net Γ Exposure (₹)</div><canvas id="ch-gamma"></canvas></div>
+  <div class="chart-card"><div class="chart-title">Volume per bucket & PCR</div><canvas id="ch-vol"></canvas></div>
+  <div class="chart-card"><div class="chart-title">Rolling Correlation (Spot vs Net Δ / Γ)</div><canvas id="ch-corr"></canvas></div>
+</div>
+
+<script>
+const API_BASE = "http://localhost:8000";
+const REFRESH_MS = 3000;
+const RECENT_KEY = "oi_recent_symbols";
+const RECENT_MAX = 8;
+const DEFAULTS = ["NSE:NIFTY50-INDEX","NSE:NIFTYBANK-INDEX","NSE:RELIANCE-EQ","NSE:HDFCBANK-EQ","NSE:TCS-EQ"];
+
+const $ = (id) => document.getElementById(id);
+const fmt = (n, d=0) => (n == null || isNaN(n)) ? "—" : Number(n).toLocaleString("en-IN", { maximumFractionDigits: d });
+const fmtK = (n) => { if (n==null||isNaN(n)) return "—"; const a=Math.abs(n); if (a>=1e7) return (n/1e7).toFixed(2)+"Cr"; if (a>=1e5) return (n/1e5).toFixed(2)+"L"; if (a>=1e3) return (n/1e3).toFixed(1)+"K"; return String(n); };
+
+const fmtChart = (n) => { 
+  if (n==null||isNaN(n)) return "—"; 
+  const a=Math.abs(n); 
+  const sign = n < 0 ? "-" : "";
+  if (a>=1e7) return sign + (a/1e7).toFixed(2)+"Cr"; 
+  if (a>=1e5) return sign + (a/1e5).toFixed(2)+"L"; 
+  if (a>=1e3) return sign + (a/1e3).toFixed(1)+"K"; 
+  return String(n); 
+};
+
+const colorPct = (v) => (v > 0 ? "pos" : v < 0 ? "neg" : "");
+
+function calcCorrelation(data, keyX, keyY) {
+  const n = data.length;
+  if (n < 3) return Array(n).fill(0);
+  
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+  for (let i = 0; i < n; i++) {
+    const x = data[i][keyX];
+    const y = data[i][keyY];
+    sumX += x; sumY += y; sumXY += x * y; sumX2 += x * x; sumY2 += y * y;
+  }
+  const num = n * sumXY - sumX * sumY;
+  const den = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+  const r = den === 0 ? 0 : num / den;
+  return Array(n).fill(r);
+}
+
+let auto = true;
+let timer = null;
+let inflight = false;
+let charts = {};
+let lastData = null;
+
+async function load() {
+  if (inflight) return;
+  const symbol = $("sym").value.trim();
+  if (!symbol) return;
+
+  pushRecent(symbol);
+  renderChips();
+
+  inflight = true;
+  $("status").textContent = "fetching…";
+  $("status").className = "pill";
+
+  try {
+    const r = await fetch(`${API_BASE}/option-chain?symbol=${encodeURIComponent(symbol)}`);
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    const data = await r.json();
+    
+    lastData = data;
+    render(data);
+    loadHistory(symbol);
+    
+    $("status").textContent = `live ${new Date().toLocaleTimeString()}`;
+    $("status").className = "pill live";
+  } catch (e) {
+    $("status").textContent = "error: " + e.message.slice(0, 50);
+    $("status").className = "pill err";
+  } finally {
+    inflight = false;
+  }
+}
+
+function render(d) {
+  const rows = d.rows ?? [];
+  const spot = d.spot ?? null;
+  const gammaExp = d.net?.gamma_exposure ?? 0;
+  const spotChp  = d.spot_chp ?? 0;
+
+  const stats = [
+    ["Symbol", d.symbol || "—", ""],
+    ["Spot", fmt(d.spot, 2) + (d.spot_chp == null ? "" : ` (${spotChp >= 0 ? "+" : ""}${spotChp}%)`), spotChp >= 0 ? "pos" : "neg"],
+    ["PCR", d.pcr ?? "—", ""],
+    ["Total Call OI", fmtK(d.call_oi_total), ""],
+    ["Total Put OI",  fmtK(d.put_oi_total),  ""],
+    ["Net Δ Exp", fmtK(d.net?.delta_exposure), ""],
+    ["Net Γ Exp", fmtK(gammaExp), gammaExp >= 0 ? "pos" : "neg"],
+    ["Expiry", d.expiries?.[0]?.date ?? "—", ""],
+    ["Max Pain", d.max_pain == null ? "—" : fmt(d.max_pain), "maxpain"],
+  ];
+
+  $("stats").innerHTML = stats.map(([k, v, cls]) =>
+    `<div class="stat"><span class="pill">${k}</span><b class="num ${cls}">${v}</b></div>`).join("");
+
+  const byStrike = new Map();
+  for (const r of rows) {
+    if (!byStrike.has(r.strike)) byStrike.set(r.strike, { ce: null, pe: null });
+    byStrike.get(r.strike)[r.type === "CE" ? "ce" : "pe"] = r;
+  }
+
+  let maxCeOi = -1, maxPeOi = -1, maxCeStrike = null, maxPeStrike = null;
+  for (const [strike, { ce, pe }] of byStrike) {
+    if (ce && ce.oi > maxCeOi) { maxCeOi = ce.oi; maxCeStrike = strike; }
+    if (pe && pe.oi > maxPeOi) { maxPeOi = pe.oi; maxPeStrike = strike; }
+  }
+  const maxPainStrike = d.max_pain ?? null;
+
+  const strikes = [...byStrike.keys()].sort((a, b) => a - b);
+  const out = [];
+  let spotPlaced = false;
+
+  for (const k of strikes) {
+    if (!spotPlaced && spot != null && k > spot) {
+      out.push(`<tr class="spot"><td colspan="15">SPOT ${fmt(spot, 2)}</td></tr>`);
+      spotPlaced = true;
+    }
+    const { ce, pe } = byStrike.get(k);
+    out.push(rowHtml(k, ce, pe, maxCeStrike, maxPeStrike, maxPainStrike));
+  }
+  if (!spotPlaced && spot != null) out.push(`<tr class="spot"><td colspan="15">SPOT ${fmt(spot, 2)}</td></tr>`);
+
+  $("body").innerHTML = out.join("");
+}
+
+function rowHtml(strike, ce, pe, maxCeStrike, maxPeStrike, maxPainStrike) {
+  const cell = (v, cls = "") => `<td class="num ${cls}">${v}</td>`;
+  const pct = (o) => o == null ? "—" : (o.oichp >= 0 ? "+" : "") + Number(o.oichp).toFixed(2) + "%";
+
+  const rowCls = [
+    strike === maxCeStrike ? "max-ce" : "",
+    strike === maxPeStrike ? "max-pe" : "",
+    strike === maxPainStrike ? "max-pain" : "",
+  ].filter(Boolean).join(" ");
+
+  return `<tr class="${rowCls}">
+    ${cell(fmtK(ce?.oi), "ce ce-oi")}
+    ${cell(pct(ce), colorPct(ce?.oichp))}
+    ${cell(fmtK(ce?.volume))}
+    ${cell(fmt(ce?.ltp, 2), "ce")}
+    ${cell(fmt(ce?.iv, 2))}
+    ${cell(fmt(ce?.delta, 3))}
+    ${cell(fmt(ce?.gamma, 6))}
+    <td class="strike">${fmt(strike)}</td>
+    ${cell(fmt(pe?.gamma, 6))}
+    ${cell(fmt(pe?.delta, 3))}
+    ${cell(fmt(pe?.iv, 2))}
+    ${cell(fmt(pe?.ltp, 2), "pe")}
+    ${cell(fmtK(pe?.volume))}
+    ${cell(pct(pe), colorPct(pe?.oichp))}
+    ${cell(fmtK(pe?.oi), "pe pe-oi")}
+  </tr>`;
+}
+
+function ensureChart(id, datasets, extraOpts = {}) {
+  if (charts[id]) return charts[id];
+  const ctx = document.getElementById(id).getContext("2d");
+  charts[id] = new Chart(ctx, {
+    type: extraOpts.type || "line",
+    data: {
+      labels: [],
+      datasets: datasets.map(c => ({
+        label: c.label, data: [], borderColor: c.color, backgroundColor: c.color + "33",
+        tension: 0.25, pointRadius: 0, borderWidth: 2, fill: c.fill ?? false,
+        yAxisID: c.yAxisID, borderDash: c.dashed ? [4, 4] : undefined,
+      })),
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: "index", intersect: false },
+      plugins: { 
+        legend: { labels: { color: "#e6edf3", boxWidth: 12 } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const val = ctx.parsed.y;
+              const rawLabel = ctx.dataset.label || "";
+              if (rawLabel.includes("Corr") || rawLabel.includes("PCR")) {
+                return `${rawLabel}: ${val != null ? val.toFixed(3) : "—"}`;
+              }
+              if (rawLabel === "Spot" || rawLabel === "Max Pain") {
+                return `${rawLabel}: ${val != null ? val.toFixed(2) : "—"}`;
+              }
+              return `${rawLabel}: ${fmtChart(val)}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: "#8b9bb0", maxTicksLimit: 6 }, grid: { color: "#1f2a37" } },
+        y: { 
+          ticks: { 
+            color: "#8b9bb0",
+            callback: (val) => {
+               if (id === "ch-corr") return val.toFixed(2);
+               return fmtChart(val);
+            }
+          }, 
+          grid: { color: "#1f2a37" }, 
+          ...(extraOpts.y || {}) 
+        },
+        ...(extraOpts.scales || {}),
+      },
+    },
+  });
+  return charts[id];
+}
+
+async function loadHistory(symbol) {
+  const since = Math.floor(Date.now()/1000) - 24*3600;
+  let hist = [];
+  try {
+    const r = await fetch(`${API_BASE}/history?symbol=${encodeURIComponent(symbol)}&since=${since}`);
+    if (r.ok) hist = await r.json();
+  } catch(e) { console.warn("History fetch failed"); }
+
+  if (!hist.length && lastData) {
+    hist = [{
+      ts: Math.floor(Date.now()/1000),
+      spot: lastData.spot,
+      net_delta_exp: lastData.net.delta_exposure,
+      net_gamma_exp: lastData.net.gamma_exposure,
+      call_oi_total: lastData.call_oi_total,
+      put_oi_total: lastData.put_oi_total,
+      call_volume: 0, put_volume: 0,
+      max_pain: lastData.max_pain
+    }];
+  }
+
+  if (!hist.length) return;
+
+  const labels = hist.map(p => new Date(p.ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}));
+  
+  const pcrSeries = hist.map(p => p.call_oi_total ? (p.put_oi_total / p.call_oi_total) : null);
+  
+  const volDelta = hist.map((p, i) => {
+    if (i === 0) return { call: 0, put: 0 };
+    return {
+      call: Math.max(p.call_volume - hist[i-1].call_volume, 0),
+      put:  Math.max(p.put_volume  - hist[i-1].put_volume,  0)
+    };
+  });
+
+  const corrDelta = calcCorrelation(hist, "spot", "net_delta_exp");
+  const corrGamma = calcCorrelation(hist, "spot", "net_gamma_exp");
+
+  const spotCh = ensureChart("ch-spot", [
+    { label: "Spot", color: "#4aa8ff" },
+    { label: "Max Pain", color: "#ffd166", dashed: true },
+  ]);
+  spotCh.data.labels = labels;
+  spotCh.data.datasets[0].data = hist.map(p => p.spot);
+  spotCh.data.datasets[1].data = hist.map(p => p.max_pain);
+  spotCh.update();
+
+  const deltaCh = ensureChart("ch-delta", [{ label: "Net Δ Exp", color: "#1fbf75", fill: false }], { y: { beginAtZero: false } });
+  deltaCh.data.labels = labels;
+  deltaCh.data.datasets[0].data = hist.map(p => p.net_delta_exp);
+  deltaCh.options.scales.y.grid.color = (ctx) => ctx.tick.value === 0 ? "#4aa8ff" : "#1f2a37";
+  deltaCh.update();
+
+  const gammaCh = ensureChart("ch-gamma", [{ label: "Net Γ Exp", color: "#ff5c5c", fill: false }], { y: { beginAtZero: false } });
+  gammaCh.data.labels = labels;
+  gammaCh.data.datasets[0].data = hist.map(p => p.net_gamma_exp);
+  gammaCh.options.scales.y.grid.color = (ctx) => ctx.tick.value === 0 ? "#4aa8ff" : "#1f2a37";
+  gammaCh.update();
+
+  const volCh = ensureChart("ch-vol", [
+    { label: "Call Vol Δ", color: "#ffb4b4", yAxisID: "y" },
+    { label: "Put Vol Δ",  color: "#a7ffcf", yAxisID: "y" },
+    { label: "PCR",        color: "#4aa8ff", yAxisID: "y1", dashed: true },
+  ], {
+    type: "line",
+    scales: {
+      y:  { type: "linear", position: "left", ticks: { color: "#8b9bb0" }, grid: { color: "#1f2a37" } },
+      y1: { type: "linear", position: "right", ticks: { color: "#4aa8ff" }, grid: { drawOnChartArea: false } },
+    }
+  });
+  volCh.data.labels = labels;
+  volCh.data.datasets[0].data = volDelta.map(v => v.call);
+  volCh.data.datasets[1].data = volDelta.map(v => v.put);
+  volCh.data.datasets[2].data = pcrSeries;
+  volCh.update();
+
+  const corrCh = ensureChart("ch-corr", [
+    { label: "Corr (Spot vs Net Δ)", color: "#1fbf75", fill: false },
+    { label: "Corr (Spot vs Net Γ)", color: "#ff5c5c", fill: false },
+  ], { y: { min: -1, max: 1, beginAtZero: false } });
+  corrCh.data.labels = labels;
+  corrCh.data.datasets[0].data = corrDelta;
+  corrCh.data.datasets[1].data = corrGamma;
+  corrCh.options.scales.y.grid.color = (ctx) => ctx.tick.value === 0 ? "#4aa8ff" : "#1f2a37";
+  corrCh.update();
+}
+
+setInterval(() => { $("clock").textContent = new Date().toLocaleTimeString(); }, 1000);
+
+function getRecent() { try { return JSON.parse(localStorage.getItem(RECENT_KEY)) || []; } catch { return []; } }
+function pushRecent(symbol) { const list = getRecent().filter(s => s !== symbol); list.unshift(symbol); localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX))); }
+function shortName(sym) { return sym.replace(/^NSE:/, "").replace(/-INDEX$/, "").replace(/-EQ$/, ""); }
+function renderChips() {
+  const current = $("sym").value.trim(); const recent = getRecent();
+  const defaultHtml = DEFAULTS.map(sym => `<span class="chip ${sym === current ? "active" : ""}" data-sym="${sym}">${shortName(sym)}</span>`).join("");
+  const recentHtml = recent.length ? `<span class="pill" style="align-self:center;margin:0 4px 0 12px">recent</span>` + recent.filter(s => !DEFAULTS.includes(s)).map(sym => `<span class="chip recent ${sym === current ? "active" : ""}" data-sym="${sym}">${shortName(sym)}<span class="x" data-del="${sym}" title="remove">×</span></span>`).join("") : "";
+  $("quick").innerHTML = defaultHtml + recentHtml;
+}
+
+$("quick").addEventListener("click", (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) { e.stopPropagation(); localStorage.setItem(RECENT_KEY, JSON.stringify(getRecent().filter(s => s !== del.dataset.del))); renderChips(); return; }
+  const chip = e.target.closest("[data-sym]");
+  if (!chip) return;
+  $("sym").value = chip.dataset.sym; pushRecent(chip.dataset.sym); renderChips(); load();
+});
+
+$("go").addEventListener("click", load);
+$("sym").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+$("auto").addEventListener("click", () => { auto = !auto; $("auto").textContent = "Auto: " + (auto ? "ON" : "OFF"); schedule(); });
+
+function schedule() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  if (auto) { timer = setInterval(load, REFRESH_MS); load(); }
+}
+
+const lastSym = getRecent()[0];
+if (lastSym) $("sym").value = lastSym;
+renderChips();
+schedule();
+</script>
+</body>
+</html>
